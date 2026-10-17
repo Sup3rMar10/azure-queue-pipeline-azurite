@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Install the pinned Azurite emulator
+        run: npm install --global azurite@3.37.0
+      - run: python -m pip install -r requirements.txt pytest
+      - name: Tests (they start Azurite themselves and use their own queues, tables and containers)
+        run: python -m pytest
+
+  demo:
+    # A worker against a real Azurite, started here with a throwaway account, using the documented environment variable.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: npm install --global azurite@3.37.0
+      - run: python -m pip install -r requirements.txt
+      - name: Run the demo
+        run: |
+          KEY=$(python -c "import base64,os;print(base64.b64encode(os.urandom(64)).decode())")
+          AZURITE_ACCOUNTS="demoacct:${KEY}" azurite --silent --location "$RUNNER_TEMP/az" --skipApiVersionCheck &
+          for _ in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/10001) 2>/dev/null && break
+            sleep 1
+          done
+          export QPIPE_CONNECTION_STRING="DefaultEndpointsProtocol=http;AccountName=demoacct;AccountKey=${KEY};BlobEndpoint=http://127.0.0.1:10000/demoacct;QueueEndpoint=http://127.0.0.1:10001/demoacct;TableEndpoint=http://127.0.0.1:10002/demoacct;"
+          python -m qpipe demo | tee demo.txt
+          grep -q "poison: invalid message" demo.txt
+          grep -q "duplicate" demo.txt
+          grep -q "retry" demo.txt
+
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          bash <(curl -s https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
